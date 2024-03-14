@@ -1,0 +1,30 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[[source]]
+url = "https://download.pytorch.org/whl/cu116"
+verify_ssl = true
+name = "downloadpytorch"
+
+[packages]
+torch = { index = "downloadpytorch"}
+torchvision = { index = "downloadpytorch"}
+torchaudio = { index = "downloadpytorch"}
+jupyter = "*"
+gymnasium = {extras = ["box2d"], version = "*"}
+pygame = "*"
+matplotlib = "*"
+tqdm = "*"
+pandas = "*"
+gym = "*"
+seaborn = "*"
+shapely = "*"
+stable-baselines3 = {extras = ["extra"], version = "*"}
+
+[dev-packages]
+
+[requires]
+python_version = "3.10"
+python_full_version = "3.10.12"
