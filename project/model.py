@@ -1,4 +1,5 @@
 import copy
+import math
 # import math
 from typing import Any, Tuple, List
 import numpy as np
@@ -115,12 +116,12 @@ class XYCutter(gym.Env):
           Коэффициент для матрицы - это "экспозиция", сколько времени головка проводит над 1 мм (пикселем) детали.
           Обрабатывающая головка "смотрит" всегда в центр матрицы.
           Матрица может быть любой размерности.
-        :param desired_intensity: Желаемый уровень средней работы и её дисперсии, выполненной над каждой точкой детали.
+        :param desired_intensity: Желаемый уровень минимальной и максимальной работы,
+          выполненной над каждой точкой детали.
         """
 
         self._working_area: Polygon = Polygon.from_bounds(*working_area.bounds)
         """Рабочая зона станка, задана отрезком."""
-        """Точка с минимальными координатами рабочей зоны (обычно - (0,0))."""
         self._object_polys: List[Polygon] = object_polys
         """Список обрабатываемых деталей."""
         self._protected_polys: List[Polygon] = protected_polys
@@ -219,6 +220,7 @@ class XYCutter(gym.Env):
         self._detail_mask = np.ndarray(shape=(int(self._working_area.bounds[2] - self._working_area.bounds[0]),
                                               int(self._working_area.bounds[3] - self._working_area.bounds[1])),
                                        dtype=np.uint8)
+        self._detail_mask.fill(0)
 
         # Заполняем маску: проверяем, что точка находится над деталью и не находится над выемкой.
         union_detail_poly = shapely.union_all(self._object_polys)
@@ -229,10 +231,10 @@ class XYCutter(gym.Env):
                 # Если мы над границами детали - начинаем проверять (для экономии CPU)
                 if detail_bounds[0] <= i <= detail_bounds[2] and detail_bounds[1] <= j <= detail_bounds[3]:
                     point = Point(i, j)
-                    chk1 = shapely.contains(union_detail_poly, point)
+                    chk1 = shapely.covers(union_detail_poly, point)
                     chk2 = True
                     if chk1 and self._protected_polys:
-                        chk2 = not shapely.contains(union_protected_poly, point)
+                        chk2 = not shapely.covers(union_protected_poly, point)
                     self._detail_mask[i, j] = 1 if chk1 and chk2 else 0
 
         # Полигон со степенью обработки каждой точки над областью детали
@@ -261,41 +263,117 @@ class XYCutter(gym.Env):
         :return: Возвращает список из значений:
           [observation, reward, terminated, truncated, info]
         """
-        next_x = max(self._working_area.bounds[0], min(action[0], self._working_area.bounds[2]))
-        next_y = max(self._working_area.bounds[1], min(action[1], self._working_area.bounds[3]))
+        next_x = int(max(self._working_area.bounds[0], min(action[0], self._working_area.bounds[2])))
+        next_y = int(max(self._working_area.bounds[1], min(action[1], self._working_area.bounds[3])))
         next_velocity = action[2]  # скорость в м/с
         next_exposition = 1 / (next_velocity * 1000)  # время нахождения головки над 1 кв. мм. детали
-        # next_is_on = action[3]
+        next_is_on = action[3]
 
-        # def _calc_angle(a, b):
-        #     return math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1])
-        # # TODO: Что-то туплю... Надо посчитать угол между прошлым вектором и текущим.
-        # #   Это нужно для будущего расчёта перегрузок головки, если модель её на 180 градусов разворачивает.
+        # Вычислили угол вектора (нет выколотых точек)
+        next_angle = math.atan2(next_y - self._cur_position.coords.xy[1][0],
+                                next_x - self._cur_position.coords.xy[0][0])
 
-        self._angle = 0
+        point_processed = set()
+        if next_is_on:
+            # Вычисляем гипотенузу
+            distance = math.sqrt(
+                (next_y - self._cur_position.coords.xy[1][0]) ** 2 +
+                (next_x - self._cur_position.coords.xy[0][0]) ** 2
+            )
+            # Создаём массив для хранения работы, выполненной за одно действие.
+            unit_of_work_array = copy.deepcopy(self._dummy_nd_array)
+            # Считаем интенсивность работы с учётом времени экспозиции.
+            work_to_apply = self._processor_intensity * next_exposition
 
-        # observation
-        # Обновляем состояние матриц с полезной и напрасной работой.
+            # Выполняем работу (пока без учёта границ детали)
 
-        processor_matr_half_width = int(self._processor_intensity.shape[0] - 1 / 2)
-        processor_matr_half_height = int(self._processor_intensity.shape[1] - 1 / 2)
+            # Идём вдоль гипотенузы с шагом 0.1 мм
+            for dd in range(0, int(distance * 10) + 1):
+                # раскладываем движение вдоль гипотенузы на движение вдоль осей
+                dx = int(round(dd / 10 * math.cos(next_angle)))
+                dy = int(round(dd / 10 * math.sin(next_angle)))
+                # выполняем работу, если в этой точке мы ещё не были
+                if (dx, dy) not in point_processed:
+                    # запоминаем точку, чтобы повторно не совершать в ней работу
+                    point_processed.add((dx, dy))
+                    # переходим к абсолютным координатам
+                    i = int(self._cur_position.coords.xy[0][0] + dx)
+                    j = int(self._cur_position.coords.xy[1][0] + dy)
+                    # применяем работу
+                    self._apply_work_to_point(i, j, unit_of_work_array, work_to_apply)
 
-        # Вычисляем работу, выполненную этим конкретным действием.
-        unit_of_work_array = copy.deepcopy(self._dummy_nd_array)
-        for i in range(self._cur_position.coords.xy[0][0], next_x + 1):
-            # Вычисляем, сколько колонок надо отрезать от матрицы self._processor_intensity
-            # TODO: меня что-то рубит уже. Надо проверить.
-            x_crop_left = min(0, i - processor_matr_half_width - self._working_area.bounds[0])
-            x_crop_right = max(0, i + processor_matr_half_width - self._working_area.bounds[2])
+            # Разносим выполненную работу на 2 слоя: работа над деталью, работа за пределами детали.
+            # Добавляем работу за текущее действие к соответствующим слоям.
+            self._work_done += np.multiply(self._detail_mask, unit_of_work_array)
+            self._work_in_vain += np.multiply((self._detail_mask * -1) + 1, unit_of_work_array)
+            del unit_of_work_array, work_to_apply
 
-            for j in range(self._cur_position.coords.xy[1][0], next_y + 1):
-                self._processor_intensity * next_exposition
+        # Формируем state
+        self._cur_position = Point(next_x, next_y)
+        self._cur_velocity = next_velocity
+        self._angle = next_angle
+        self._is_on = next_is_on
 
-        self._state = []
+        # Формируем вектор состояний (мы чуть позже изымем из него матрицы _work_done и _work_in_vain).
+        self._state = [self._cur_position.coords.xy[0][0],
+                       self._cur_position.coords.xy[1][0],
+                       self._cur_velocity,
+                       self._angle,
+                       self._is_on,
+                       self._work_done,
+                       self._work_in_vain]
+
         reward = 0
         terminated = False
+        done = False
+        info = dict()
 
-        return np.array(self._state, dtype=np.float32), reward, terminated, False, {}
+        return self._state, reward, terminated, done, info
+
+    def _apply_work_to_point(self, i, j, unit_of_work_array, work_to_apply):
+        """
+        Функция применяет работу к области точек.
+
+        :param i: Координата головки X.
+        :param j: Координата головки Y.
+        :param unit_of_work_array: Массив размером с рабочее поле, где мы накапливаем работу.
+        :param work_to_apply: Матрица работы (скорость прохода головки уже учтена)
+        """
+        # Половина размера матрицы с работой.
+        # Удобнее считать, что матрица с работой имеет координаты (0, 0) в самом центре.
+        # Слева и снизу - отрицательные, а справа и сверху положительные (обычные оси OX и OY).
+        # Матрица с работой применяется к точке (i, j) своими координатами (0, 0) и
+        #   накрывает небольшую зону вокруг этой точки, если позволяют границы рабочей зоны.
+        work_hw = int((self._processor_intensity.shape[0] - 1) / 2)
+        work_hh = int((self._processor_intensity.shape[1] - 1) / 2)
+
+        # Смотрим сколько надо от матрицы с работой отрезать слева и справа,
+        # если матрица применяется вдоль границы рабочего поля.
+        # work_hw = 3
+        # i = 0, crop_min_x = 3    -min(0, i - work_hw)
+        # i = 1, crom_min_x = 2
+        # i = 2, crop_min_x = 1
+        # i = 3, crop_min_x = 0
+        # i = 4, crop_min_x = 0
+        # max_i = 10
+        # i = 6, crop_max_x = 6    work_hw + min(work_hw,  max_i - i) = 3 + min(3, 10-6) = 6
+        # i = 7, crop_max_x = 6    work_hw + min(work_hw,  max_i - i) = 3 + min(3, 10-7) = 6
+        # i = 8, crop_max_x = 5    work_hw + min(work_hw,  max_i - i) = 3 + min(3, 10-8) = 5
+        # i = 9, crop_max_x = 4
+        # i =10, crop_max_x = 3
+
+        crop_min_x = -min(0, i - work_hw)
+        crop_max_x = work_hw + min(work_hw,  int(self._working_area.bounds[2]) - i)
+        crop_min_y = -min(0, j - work_hh)
+        crop_max_y = work_hh + min(work_hh,  int(self._working_area.bounds[3]) - j)
+
+        # диапазон точек, к которым применяем работу (вдоль границ что-то будет отрезаться)
+        min_x = int(max(self._working_area.bounds[0], i - work_hw))
+        max_x = int(min(self._working_area.bounds[2], i + work_hw))
+        min_y = int(max(self._working_area.bounds[1], j - work_hh))
+        max_y = int(min(self._working_area.bounds[3], j + work_hh))
+
+        unit_of_work_array[min_y:max_y, min_x:max_x] += work_to_apply[crop_min_y: crop_max_y, crop_min_x: crop_max_x]
 
     def close(self):
         pass
@@ -318,7 +396,16 @@ if __name__ == '__main__':
         object_polys=[Polygon([[10, 10], [10, 30], [30, 30], [30, 10], [10, 10]])],
         protected_polys=[Polygon([[20, 20], [20, 25], [25, 25], [25, 20], [20, 20]])],
         processor_intensity=header_intensity,
-        desired_intensity=(0.8, 0.05 ** 2),
+        desired_intensity=(0.8, 0.85),
     )
+
+    action = [6, 10, 1.25, 0]
+    state_1 = env.step(action)
+    action = [35, 45, 1.25, 1]
+    state_2 = env.step(action)
+    action = [35, 10, 1.25, 0]
+    state_3 = env.step(action)
+    action = [6, 45, 0.8, 1]
+    state_4 = env.step(action)
 
     print(123)
