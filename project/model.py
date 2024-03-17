@@ -43,7 +43,7 @@ class XYCutter(gym.Env):
     Note: Пока не учитываются импульсы, перегрузки и инерция.
 
 
-    ## Пространство наблюдений
+    ## Пространство состояний (полностью наблюдаемая среда)
 
     State = [cur X, cur Y, cur Angle, cur Velocity, cur isOn, layer_painted, layer_loss]
 
@@ -150,12 +150,17 @@ class XYCutter(gym.Env):
         self._work_in_vain: np.ndarray | None = None
         """Матрица размером с рабочую зону, которая аккумулирует работу головки за пределами детали, 
         пока головка движется во включенном состоянии."""
+
         self._state = []
         """Вектор текущего состояния системы"""
         self._reward: Tuple = (0, 0)
         """Текущая накопленная награда/штраф среды за выполненную работу"""
         self._actions = []
         """Журнал действий"""
+        self._done: int = 0
+        """Успешное завершение эпизода"""
+        self._terminated: int = 0
+        """Завершение эпизода с ошибкой"""
 
         # Проверки
         self._check_incoming_data()
@@ -255,6 +260,7 @@ class XYCutter(gym.Env):
                        self._cur_velocity,
                        self._angle,
                        self._is_on,
+                       self._detail_mask,
                        self._work_done,
                        self._work_in_vain]
         self._reward = (0, 0)
@@ -278,72 +284,81 @@ class XYCutter(gym.Env):
         """
         self._actions.append(action)
 
-        next_x = int(max(self._working_area.bounds[0], min(action[0], self._working_area.bounds[2])))
-        next_y = int(max(self._working_area.bounds[1], min(action[1], self._working_area.bounds[3])))
-        next_velocity = action[2]  # скорость в м/с
-        next_exposition = 1 / (next_velocity * 1000)  # время нахождения головки над 1 кв. мм. детали
-        next_is_on = action[3]
-
+        next_x = round(action[0])
+        next_y = round(action[1])
         # Вычислили угол вектора (нет выколотых точек)
         next_angle = math.atan2(next_y - self._cur_position.coords.xy[1][0],
                                 next_x - self._cur_position.coords.xy[0][0])
+        next_velocity = action[2]  # скорость в м/с
+        next_exposition = 1 / (next_velocity * 1000)  # время нахождения головки над 1 кв. мм. детали
+        next_is_on = round(action[3])
 
-        point_processed = set()
-        if next_is_on:
-            # Вычисляем гипотенузу
-            distance = math.sqrt(
-                (next_y - self._cur_position.coords.xy[1][0]) ** 2 +
-                (next_x - self._cur_position.coords.xy[0][0]) ** 2
-            )
-            # Создаём массив для хранения работы, выполненной за одно действие.
-            unit_of_work_array = copy.deepcopy(self._dummy_nd_array)
-            # Считаем интенсивность работы с учётом времени экспозиции.
-            work_to_apply = self._processor_intensity * next_exposition
+        terminated = self._calc_early_terminated(next_x, next_y, next_velocity, next_is_on)
 
-            # Выполняем работу (пока без учёта границ детали)
+        # Если входящие параметры в порядке
+        if not terminated:
+            if next_is_on:
+                # Вычисляем гипотенузу
+                distance = math.sqrt(
+                    (next_y - self._cur_position.coords.xy[1][0]) ** 2 +
+                    (next_x - self._cur_position.coords.xy[0][0]) ** 2
+                )
+                # Создаём массив для хранения работы, выполненной за одно действие.
+                unit_of_work_array = copy.deepcopy(self._dummy_nd_array)
+                # Считаем интенсивность работы с учётом времени экспозиции.
+                work_to_apply = self._processor_intensity * next_exposition
 
-            # Идём вдоль гипотенузы с шагом 0.1 мм
-            for dd in range(0, int(distance * 10) + 1):
-                # раскладываем движение вдоль гипотенузы на движение вдоль осей
-                dx = int(round(dd / 10 * math.cos(next_angle)))
-                dy = int(round(dd / 10 * math.sin(next_angle)))
-                # выполняем работу, если в этой точке мы ещё не были
-                if (dx, dy) not in point_processed:
-                    # запоминаем точку, чтобы повторно не совершать в ней работу
-                    point_processed.add((dx, dy))
-                    # переходим к абсолютным координатам
-                    i = int(self._cur_position.coords.xy[0][0] + dx)
-                    j = int(self._cur_position.coords.xy[1][0] + dy)
-                    # применяем работу
-                    self._apply_work_to_point(i, j, unit_of_work_array, work_to_apply)
+                # Выполняем работу (пока без учёта границ детали)
 
-            # Разносим выполненную работу на 2 слоя: работа над деталью, работа за пределами детали.
-            # Добавляем работу за текущее действие к соответствующим слоям.
-            self._work_done += np.multiply(self._detail_mask, unit_of_work_array)
-            self._work_in_vain += np.multiply((self._detail_mask * -1) + 1, unit_of_work_array)
-            del unit_of_work_array, work_to_apply
+                # Идём вдоль гипотенузы с шагом 0.1 мм
+                point_processed = set()
+                for dd in range(0, int(distance * 10) + 1):
+                    # раскладываем движение вдоль гипотенузы на движение вдоль осей
+                    dx = int(round(dd / 10 * math.cos(next_angle)))
+                    dy = int(round(dd / 10 * math.sin(next_angle)))
+                    # выполняем работу, если в этой точке мы ещё не были
+                    if (dx, dy) not in point_processed:
+                        # запоминаем точку, чтобы повторно не совершать в ней работу
+                        point_processed.add((dx, dy))
+                        # переходим к абсолютным координатам
+                        i = int(self._cur_position.coords.xy[0][0] + dx)
+                        j = int(self._cur_position.coords.xy[1][0] + dy)
+                        # применяем работу
+                        self._apply_work_to_point(i, j, unit_of_work_array, work_to_apply)
 
-        # Формируем state
-        self._cur_position = Point(next_x, next_y)
-        self._cur_velocity = next_velocity
-        self._angle = next_angle
-        self._is_on = next_is_on
+                # Разносим выполненную работу на 2 слоя: работа над деталью, работа за пределами детали.
+                # Добавляем работу за текущее действие к соответствующим слоям.
+                self._work_done += np.multiply(self._detail_mask, unit_of_work_array)
+                self._work_in_vain += np.multiply((self._detail_mask * -1) + 1, unit_of_work_array)
+                del unit_of_work_array, work_to_apply
 
-        # Формируем вектор состояний (мы чуть позже изымем из него матрицы _work_done и _work_in_vain).
-        self._state = [self._cur_position.coords.xy[0][0],
-                       self._cur_position.coords.xy[1][0],
-                       self._cur_velocity,
-                       self._angle,
-                       self._is_on,
-                       self._work_done,
-                       self._work_in_vain]
+            # Формируем state
+            self._cur_position = Point(next_x, next_y)
+            self._cur_velocity = next_velocity
+            self._angle = next_angle
+            self._is_on = next_is_on
 
-        self._reward = self._calc_reward()  # Возвращает общую награду и награду за текущий шаг
-        terminated = False
-        done = False
-        info = dict()
+            # Формируем вектор состояний (мы чуть позже изымем из него матрицы _work_done и _work_in_vain).
+            # TODO: Хочу, чтобы модель сразу знала про габариты и быстро научилась предлагать допустимые значения.
+            #   Видится, что в state надо добавить допустимые значения для элементов вектора action.
+            self._state = [self._cur_position.coords.xy[0][0],
+                           self._cur_position.coords.xy[1][0],
+                           self._cur_velocity,
+                           self._angle,
+                           self._is_on,
+                           self._detail_mask,  # TODO: вопрос, можно ли сюда передавать коррелированные параметры
+                           self._work_done,
+                           self._work_in_vain]
 
-        return self._state, self._reward, terminated, done, info
+            self._reward, terminated, self._done = self._calc_reward()
+            info = dict()
+
+        else:
+            info = dict()
+            self._reward = (self._reward[0] - 200, -200)
+            self._done = 0
+
+        return self._state, self._reward, terminated, self._done, info
 
     def _apply_work_to_point(self, i, j, unit_of_work_array, work_to_apply):
         """
@@ -414,16 +429,21 @@ class XYCutter(gym.Env):
         avg_desired_level = self._detail_mask * ((self._desired_intensity[0] + self._desired_intensity[1]) / 2)
         max_desired_level = self._detail_mask * self._desired_intensity[1]
 
-        work_nearly_done = self._work_done * (self._work_done < min_desired_level)
-        work_done_properly = (self._work_done
+        work_not_started = self._detail_mask * (self._work_done == 0) * 1
+        work_nearly_done = (self._detail_mask
+                            * self._work_done
+                            * (self._work_done > 0)
+                            * (self._work_done < min_desired_level))
+        work_done_properly = (self._detail_mask
+                              * self._work_done
                               * (self._work_done >= min_desired_level)
                               * (self._work_done <= max_desired_level))
-        work_overdone = self._work_done * (self._work_done > max_desired_level)
+        work_overdone = self._detail_mask * self._work_done * (self._work_done > max_desired_level)
 
         union_poly: Polygon = shapely.union_all(self._object_polys)
         detail_w = union_poly.bounds[2] - union_poly.bounds[0]
         detail_h = union_poly.bounds[3] - union_poly.bounds[1]
-        # Средняя экспозиция - время нахождения головки над 1 кв. мм. детали (её бы в константы)
+        # Средняя экспозиция - время нахождения головки над 1 кв. мм. детали TODO: (её бы в константы)
         avg_exposition = 1 / 100
         # Разница в интенсивностях обработки между желаемой и средней за один проход со скоростью 1 м/с.
         # По-хорошему, этот мультипликатор должен иметь значение в интервале [1.5, 4].
@@ -460,14 +480,41 @@ class XYCutter(gym.Env):
 
         delta_reward = reward - self._reward[0]
 
-        return reward, delta_reward
-
-    def _calc_break(self):
-        # Завершаем эпизод, если:
         # 1) Деталь обработана с нужной степенью
-
+        done = 1 if (work_not_started.sum() == 0
+                     and work_nearly_done.sum() == 0
+                     and work_done_properly.sum() > 0) else 0
         # 2) Накопленная награда опустилась меньше -200
-        pass
+        terminated = 1 if not done and (reward < -200) else 0
+
+        return (reward, delta_reward), terminated, done
+
+    def _calc_early_terminated(self, next_x: int, next_y: int, next_velocity: float, next_is_on: int):
+        """
+        Функция для раннего выхода из процедуры, если на вход поданы запредельные значения параметров действия.
+        :param next_x:
+        :param next_y:
+        :param next_velocity:
+        :param next_is_on:
+        :return: 1 - если ошибка и надо выходить, 0 - можно продолжать обучение
+        """
+        terminated = 0
+        # 1) Координаты действия вышли за пределы нормы
+        if (next_x < self._working_area.bounds[0]
+                or next_x > self._working_area.bounds[2]):
+            terminated = 1
+        elif (next_y < self._working_area.bounds[1]
+                or next_y > self._working_area.bounds[3]):
+            terminated = 1
+        # 2) Скорость вышла за пределы нормы
+        elif next_velocity < 0 or next_velocity > 3:
+            terminated = 1
+        elif next_is_on < 0 or next_is_on > 1:
+            terminated = 1
+        else:
+            pass
+
+        return terminated
 
     def close(self):
         pass
@@ -493,13 +540,13 @@ if __name__ == '__main__':
         desired_intensity=(0.008, 0.009),
     )
 
-    action = [6, 10, 1.25, 0]
-    state_1 = env.step(action)
-    action = [35, 45, 1.25, 1]
-    state_2 = env.step(action)
-    action = [35, 10, 1.25, 0]
-    state_3 = env.step(action)
-    action = [6, 45, 0.8, 1]
-    state_4 = env.step(action)
+    action_1 = [6, 10, 1.25, 0]
+    state_1 = env.step(action_1)
+    action_2 = [35, 45, 1.25, 1]
+    state_2 = env.step(action_2)
+    action_3 = [35, 10, 1.25, 0]
+    state_3 = env.step(action_3)
+    action_4 = [6, 45, 0.8, 1]
+    state_4 = env.step(action_4)
 
     print(123)
