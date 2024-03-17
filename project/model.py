@@ -423,7 +423,16 @@ class XYCutter(gym.Env):
         union_poly: Polygon = shapely.union_all(self._object_polys)
         detail_w = union_poly.bounds[2] - union_poly.bounds[0]
         detail_h = union_poly.bounds[3] - union_poly.bounds[1]
-        expected_num_of_actions = max(detail_w, detail_h) / (self._processor_intensity.shape[0] - 1 / 2) * 2 * 2
+        # Средняя экспозиция - время нахождения головки над 1 кв. мм. детали (её бы в константы)
+        avg_exposition = 1 / 100
+        # Разница в интенсивностях обработки между желаемой и средней за один проход со скоростью 1 м/с.
+        # По-хорошему, этот мультипликатор должен иметь значение в интервале [1.5, 4].
+        density_diff_mult = (((self._desired_intensity[0] + self._desired_intensity[1]) / 2) /
+                             (self._processor_intensity.mean() * avg_exposition))
+        # минимальный размер заготовки / половина размера головки
+        # * 2 прохода * разницу в интенсивностях обработки * 2 (на всякий пожарный)
+        expected_num_of_passes = (min(detail_w, detail_h) / (self._processor_intensity.shape[0] - 1 / 2)
+                                  * 2 * density_diff_mult * 2)
 
         # ======================
 
@@ -431,8 +440,8 @@ class XYCutter(gym.Env):
         # 1) Награждаем за уменьшение необработанной области (x2)
         reward += (work_nearly_done.sum() / min_desired_level.sum()) * 50
         reward += (work_done_properly.sum() / avg_desired_level.sum()) * 200
-        # 2) Награждаем на 0.1 за каждое действие
-        reward += 0.1 * (len(self._actions)-1)
+        # 2) Награждаем на 0.1 за каждое действие (нулевое действие - это начальная позиция, не учитываем)
+        reward += 0.1 * (len(self._actions) - 1)
 
         # Штрафуем
         # 1) Штрафуем за работу за пределами детали (x1).
@@ -447,7 +456,7 @@ class XYCutter(gym.Env):
                         and round(self._actions[-1][3]) == 1) else 0
         # 5) Штрафуем на 0.2 за каждое действие выше определённого количества.
         #    (короткая сторона детали мм. / 0.5 площади головки мм. * 2 действия * 2 раза (запас))
-        reward -= 0.2 * ((len(self._actions) - 1) >= expected_num_of_actions)
+        reward -= 0.2 * ((len(self._actions) - 1) >= expected_num_of_passes)
 
         delta_reward = reward - self._reward[0]
 
@@ -456,6 +465,7 @@ class XYCutter(gym.Env):
     def _calc_break(self):
         # Завершаем эпизод, если:
         # 1) Деталь обработана с нужной степенью
+
         # 2) Накопленная награда опустилась меньше -200
         pass
 
@@ -480,7 +490,7 @@ if __name__ == '__main__':
         object_polys=[Polygon([[10, 10], [10, 30], [30, 30], [30, 10], [10, 10]])],
         protected_polys=[Polygon([[20, 20], [20, 25], [25, 25], [25, 20], [20, 20]])],
         processor_intensity=header_intensity,
-        desired_intensity=(0.08, 0.09),
+        desired_intensity=(0.008, 0.009),
     )
 
     action = [6, 10, 1.25, 0]
