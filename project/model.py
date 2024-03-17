@@ -129,7 +129,7 @@ class XYCutter(gym.Env):
         self._processor_intensity: np.ndarray = processor_intensity
         """Матрица с интенсивностью обработки детали в 1 секунду."""
         self._desired_intensity: Tuple[float, float] = desired_intensity
-        """Желаемый уровень средней работы и её дисперсии, выполненной над каждой точкой детали."""
+        """Желаемый минимальный и максимальный уровни обработки, выполненной над каждой точкой детали."""
 
         self._cur_position = Point([0, 0])
         """Текущее положение головки (XY-случай, позиция в миллиметрах)."""
@@ -152,6 +152,10 @@ class XYCutter(gym.Env):
         пока головка движется во включенном состоянии."""
         self._state = []
         """Вектор текущего состояния системы"""
+        self._reward: Tuple = (0, 0)
+        """Текущая накопленная награда/штраф среды за выполненную работу"""
+        self._actions = []
+        """Журнал действий"""
 
         # Проверки
         self._check_incoming_data()
@@ -187,9 +191,11 @@ class XYCutter(gym.Env):
             'Внутри обрабатываемой зоны не может делаться отрицательная работа.'
 
         assert self._desired_intensity[0] > 0, \
-            'Желаемый средний уровень обработки не может быть нулевым или отрицательным.'
+            'Желаемый минимальный уровень обработки не может быть нулевым или отрицательным.'
         assert self._desired_intensity[1] > 0, \
-            'Дисперсия уровня обработки не может быть нулевой или отрицательной.'
+            'Желаемый максимальный уровень обработки не может быть нулевым или отрицательным.'
+        assert self._desired_intensity[0] < self._desired_intensity[1], \
+            'Желаемый минимальный уровень должен быть меньше желаемого максимального уровня обработки.'
 
     def reset(self,
               *,
@@ -251,6 +257,13 @@ class XYCutter(gym.Env):
                        self._is_on,
                        self._work_done,
                        self._work_in_vain]
+        self._reward = (0, 0)
+
+        self._actions = [(self._cur_position.coords.xy[0][0],
+                          self._cur_position.coords.xy[1][0],
+                          self._cur_velocity,
+                          self._is_on)]
+
         return self._state
 
     def step(self, action: List):
@@ -263,6 +276,8 @@ class XYCutter(gym.Env):
         :return: Возвращает список из значений:
           [observation, reward, terminated, truncated, info]
         """
+        self._actions.append(action)
+
         next_x = int(max(self._working_area.bounds[0], min(action[0], self._working_area.bounds[2])))
         next_y = int(max(self._working_area.bounds[1], min(action[1], self._working_area.bounds[3])))
         next_velocity = action[2]  # скорость в м/с
@@ -323,12 +338,12 @@ class XYCutter(gym.Env):
                        self._work_done,
                        self._work_in_vain]
 
-        reward = 0
+        self._reward = self._calc_reward()  # Возвращает общую награду и награду за текущий шаг
         terminated = False
         done = False
         info = dict()
 
-        return self._state, reward, terminated, done, info
+        return self._state, self._reward, terminated, done, info
 
     def _apply_work_to_point(self, i, j, unit_of_work_array, work_to_apply):
         """
@@ -375,6 +390,75 @@ class XYCutter(gym.Env):
 
         unit_of_work_array[min_y:max_y, min_x:max_x] += work_to_apply[crop_min_y: crop_max_y, crop_min_x: crop_max_x]
 
+    def _calc_reward(self):
+        # Награждаем:
+        # 1) Награждаем за уменьшение необработанной области (x2).
+        #    Общий объём необходимой работы можно посчитать. Лучше перейти в относительные величины
+        #    (сделанная / требуемая работа). Тогда максимальное вознаграждение будет 100 * 2 единиц.
+        # 2) Награждаем на 0.1 за каждое действие
+        #
+        # Штрафуем:
+        # 1) Штрафуем за работу за пределами детали (x1). Опять-таки лучше в тех же относительных величинах.
+        # 2) Штрафуем за обработку детали сверх необходимого (x4).
+        #    % излишне обработанных кв. мм. детали * 30 баллов
+        # 3) Штрафуем за поворот головки более 90 градусов (за каждый поворот).
+        #    Предварительно, на 1 единицу.
+        # 4) Штрафуем за включение головки над деталью (опционально, для лазера это не нужно?)
+        #    Предварительно, на 5 единиц.
+        # 5) Штрафуем на 0.2 за каждое действие выше определённого количества.
+        #    (короткая сторона детали мм. / 0.5 площади головки мм. * 2 действия * 2 раза (запас))
+        #    (!!!) Этот штраф может помешать равномерному выполнению работы.
+
+        reward = 0
+        min_desired_level = self._detail_mask * self._desired_intensity[0]
+        avg_desired_level = self._detail_mask * ((self._desired_intensity[0] + self._desired_intensity[1]) / 2)
+        max_desired_level = self._detail_mask * self._desired_intensity[1]
+
+        work_nearly_done = self._work_done * (self._work_done < min_desired_level)
+        work_done_properly = (self._work_done
+                              * (self._work_done >= min_desired_level)
+                              * (self._work_done <= max_desired_level))
+        work_overdone = self._work_done * (self._work_done > max_desired_level)
+
+        union_poly: Polygon = shapely.union_all(self._object_polys)
+        detail_w = union_poly.bounds[2] - union_poly.bounds[0]
+        detail_h = union_poly.bounds[3] - union_poly.bounds[1]
+        expected_num_of_actions = max(detail_w, detail_h) / (self._processor_intensity.shape[0] - 1 / 2) * 2 * 2
+
+        # ======================
+
+        # Награждаем
+        # 1) Награждаем за уменьшение необработанной области (x2)
+        reward += (work_nearly_done.sum() / min_desired_level.sum()) * 50
+        reward += (work_done_properly.sum() / avg_desired_level.sum()) * 200
+        # 2) Награждаем на 0.1 за каждое действие
+        reward += 0.1 * (len(self._actions)-1)
+
+        # Штрафуем
+        # 1) Штрафуем за работу за пределами детали (x1).
+        reward -= (self._work_in_vain.sum() / ((self._detail_mask * -1) + 1).sum()) * 100
+        # 2) Штрафуем за обработку детали сверх необходимого (x4).
+        reward -= (work_overdone.sum() / max_desired_level.sum()) * 400
+        # 3) Штрафуем за поворот головки более 90 градусов (за каждый поворот).
+        reward -= 1 if abs(self._angle) > math.pi / 2 else 0
+        # 4) Штрафуем за включение головки над деталью (опционально, для лазера это не нужно?)
+        reward -= 5 if (self._detail_mask[int(self._actions[-2][0]), int(self._actions[-2][1])] == 1
+                        and round(self._actions[-2][3]) == 0
+                        and round(self._actions[-1][3]) == 1) else 0
+        # 5) Штрафуем на 0.2 за каждое действие выше определённого количества.
+        #    (короткая сторона детали мм. / 0.5 площади головки мм. * 2 действия * 2 раза (запас))
+        reward -= 0.2 * ((len(self._actions) - 1) >= expected_num_of_actions)
+
+        delta_reward = reward - self._reward[0]
+
+        return reward, delta_reward
+
+    def _calc_break(self):
+        # Завершаем эпизод, если:
+        # 1) Деталь обработана с нужной степенью
+        # 2) Накопленная награда опустилась меньше -200
+        pass
+
     def close(self):
         pass
 
@@ -396,7 +480,7 @@ if __name__ == '__main__':
         object_polys=[Polygon([[10, 10], [10, 30], [30, 30], [30, 10], [10, 10]])],
         protected_polys=[Polygon([[20, 20], [20, 25], [25, 25], [25, 20], [20, 20]])],
         processor_intensity=header_intensity,
-        desired_intensity=(0.8, 0.85),
+        desired_intensity=(0.08, 0.09),
     )
 
     action = [6, 10, 1.25, 0]
