@@ -11,6 +11,10 @@ from torch.nn import functional as F, Parameter
 from project.model import QNet, PolicyNet
 from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer
 
+# Ссылки:
+# https://spinningup.openai.com/en/latest/spinningup/rl_intro.html
+# https://spinningup.openai.com/en/latest/algorithms/ddpg.html
+
 # Задали интенсивность обработки головкой
 header_intensity = np.array(
     [
@@ -35,19 +39,18 @@ env = XYCutter(
 # выбрали устройство вычисления
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# сделали много Q-сетей (Twin-Q) (Критики, прогнозируют награду при заданном состоянии и действии)
+# Сделали много Mu-сетей (Акторы, прогнозируют действие при заданном состоянии).
+mu_origin_model = PolicyNet().to(device)  # mu_theta
+mu_target_model = PolicyNet().to(device)  # mu_theta'
+_ = mu_target_model.requires_grad_(False)  # target model doesn't need grad
+
+# Сделали много Q-сетей (Twin-Q) (Критики, прогнозируют награду при заданном состоянии и действии).
 q_origin_model1 = QNet().to(device)  # Q_phi1
 q_origin_model2 = QNet().to(device)  # Q_phi2
 q_target_model1 = QNet().to(device)  # Q_phi1'
 q_target_model2 = QNet().to(device)  # Q_phi2'
 _ = q_target_model1.requires_grad_(False)  # target model doesn't need grad
 _ = q_target_model2.requires_grad_(False)  # target model doesn't need grad
-
-# Сделали много Mu-сетей (Акторы, прогнозируют действие при заданном состоянии)
-mu_origin_model = PolicyNet().to(device)  # mu_theta
-mu_target_model = PolicyNet().to(device)  # mu_theta'
-_ = mu_target_model.requires_grad_(False)  # target model doesn't need grad
-
 
 GAMMA = 0.99
 opt_q1 = torch.optim.AdamW(q_origin_model1.parameters(), lr=0.0005)
