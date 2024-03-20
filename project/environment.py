@@ -553,4 +553,7 @@ if __name__ == '__main__':
     action_4 = [6, 45, 0.8, 1]
     state_4 = env.step(action_4)
 
+    from project.utils import plot_head_path  # вредная зависимость
+    plot_head_path([(x, y) for x, y, _, _ in env._actions])
+
     print(123)

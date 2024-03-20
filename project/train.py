@@ -1,3 +1,4 @@
+import time
 from typing import List
 
 import torch
@@ -9,7 +10,8 @@ import numpy as np
 from torch.nn import functional as F, Parameter
 
 from project.model import QNet, PolicyNet
-from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer, draw_plot
+from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer, draw_training_plot, plot_density_chart, \
+    plot_head_path
 
 # Ссылки:
 # https://spinningup.openai.com/en/latest/spinningup/rl_intro.html
@@ -36,20 +38,24 @@ header_intensity = np.array(
 
 # Инициализировали окружение
 env = XYCutter(
-    working_area=LineString([[0, 0], [50, 50]]),
-    object_polys=[Polygon([[10, 10], [10, 30], [30, 30], [30, 10], [10, 10]])],
-    protected_polys=[Polygon([[20, 20], [20, 25], [25, 25], [25, 20], [20, 20]])],
+    working_area=LineString([[0, 0], [30, 30]]),
+    object_polys=[Polygon([[10, 10], [10, 20], [20, 20], [20, 10], [10, 10]])],
+    protected_polys=[Polygon([[12, 12], [12, 15], [15, 15], [15, 12], [12, 12]])],
     processor_intensity=header_intensity,
     desired_intensity=(0.008, 0.009),
 )
+
+plot_density_chart(header_intensity)
 
 # выбрали устройство вычисления
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = 'cpu'
 
+max_values = torch.tensor([30, 30, 3, 1]).to(device)  # TODO: hardcode
+
 # Сделали много Mu-сетей (Акторы, прогнозируют действие при заданном состоянии).
-mu_origin_model = PolicyNet().to(device)  # mu_theta
-mu_target_model = PolicyNet().to(device)  # mu_theta'
+mu_origin_model = PolicyNet(max_values=max_values).to(device)  # mu_theta
+mu_target_model = PolicyNet(max_values=max_values).to(device)  # mu_theta'
 _ = mu_target_model.requires_grad_(False)  # target model doesn't need grad
 
 # Сделали много Q-сетей (Twin-Q) (Критики, прогнозируют награду при заданном состоянии и действии).
@@ -98,7 +104,7 @@ def optimize(states_digs: List, states_matr: List, actions: List, rewards: List,
     q_tgt_next_min = torch.minimum(q1_tgt_next, q2_tgt_next)
     q_tgt = rewards + GAMMA * (1.0 - dones) * q_tgt_next_min  # некая усреднённая награда для обеих сетей-критиков
 
-    # Обучаем критика 1 (Q-сеть)
+    # Обучаем критика #1 (Q-сеть)
     opt_q1.zero_grad()
     q1_org = q_origin_model1(states_digs, states_matr, actions)  # "грубая" модель
     loss_q1 = F.mse_loss(
@@ -108,7 +114,7 @@ def optimize(states_digs: List, states_matr: List, actions: List, rewards: List,
     loss_q1.sum().backward()
     opt_q1.step()
 
-    # Обучаем критика 2 (Q-сеть)
+    # Обучаем критика #2 (Q-сеть)
     opt_q2.zero_grad()
     q2_org = q_origin_model2(states_digs, states_matr, actions)  # "грубая" модель
     loss_q2 = F.mse_loss(
@@ -124,8 +130,7 @@ def optimize(states_digs: List, states_matr: List, actions: List, rewards: List,
     for p in q_origin_model1.parameters():
         p.requires_grad = False  # disable grad in q_origin_model1 before computation
     q_tgt_max = q_origin_model1(states_digs, states_matr, mu_org)  # это уже обученная "грубая" модель критика
-    # TODO: не понимаю, что здесь происходит. Кажется, это ответ на структуру последнего слоя Критика
-    #   Видимо, Критик должен прогнозировать Reward.
+    # TODO: не понимаю, что здесь происходит.
     (-q_tgt_max).sum().backward()
     opt_mu.step()
     for p in q_origin_model1.parameters():
@@ -169,7 +174,7 @@ def calc_action_with_noise(state: List):
         noise = ou_action_noise()
         # действие + небольшая случайность
         action = action_det.cpu().numpy() + noise  # шум небольшой, масштабировать не будем
-        action = np.clip(action, [0, 0, 0.05, 0], [49, 49, 3, 1])  # TODO: hardcode
+        action = np.clip(action, [0.01, 0.01, 0.05, 0], [29.99, 29.99, 3, 1])  # TODO: hardcode
         return action[0].tolist()
 
 
@@ -184,7 +189,7 @@ batch_size = 250  # 250
 reward_records = []
 cum_reward = 0
 avg_reward = 0
-progress_bar = tqdm(range(10))
+progress_bar = tqdm(range(30))
 for i in progress_bar:
     progress_bar.set_description('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
     # Run episode till done
@@ -214,15 +219,25 @@ for i in progress_bar:
         cnt += 1
         # if cnt % 100 == 0:
         #     print('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
+        if terminated or done:
+            # plot_density_chart(state[13])
+            # plot_density_chart(state[14])
+            # plot_density_chart(state[15])
+            plot_head_path([(x, y) for x,y,_,_ in env._actions])
 
-    # Записываем награду эпизода в вектор с историей
+            # Записываем награду эпизода в вектор с историей
     reward_records.append(cum_reward)
-    # Считаем среднюю награду за последние 50 эпизодов
-    avg_reward = np.average(reward_records[-50:])
+    # Считаем среднюю награду за последние 10 эпизодов
+    avg_reward = np.average(reward_records[-10:])
 
     # Завершаем обучение, когда средняя награда держится выше 475.0
-    if avg_reward > 475.0:
+    if avg_reward > 200.0:
         break
 
+draw_training_plot(reward_records)
+time.sleep(0.1)
+plot_density_chart(env._work_done)
+time.sleep(0.1)
+plot_density_chart(env._work_in_vain)
+
 print("\nDone")
-draw_plot(reward_records)

@@ -22,6 +22,7 @@ gym = "*"
 seaborn = "*"
 shapely = "*"
 stable-baselines3 = {extras = ["extra"], version = "*"}
+scipy = "*"
 
 [dev-packages]
 

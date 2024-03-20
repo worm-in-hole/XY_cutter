@@ -1,5 +1,9 @@
 import random
+from typing import List
+
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import kde
 
 
 class ReplayBuffer:
@@ -60,20 +64,28 @@ class OrnsteinUhlenbeckActionNoise:
         self.x_prev = self.x0 if self.x0 is not None else np.zeros_like(self.mu)
 
 
-def draw_plot(records):
-    import matplotlib.pyplot as plt
+def draw_training_plot(records):
     # Generate recent 50 interval average
     average_reward = []
     for idx in range(len(records)):
-        avg_list = np.empty(shape=(1,), dtype=int)
-        if idx < 50:
-            avg_list = records[:idx + 1]
-        else:
-            avg_list = records[idx - 49:idx + 1]
+        avg_list = records[max(0, idx - 10):idx + 1]
         average_reward.append(np.average(avg_list))
     plt.plot(records, label='reward')
     plt.plot(average_reward, label='average reward')
     plt.xlabel('N steps')
     plt.ylabel('Reward')
     plt.legend()
+    plt.show()
+
+
+def plot_density_chart(density_tbl: np.ndarray):
+    plt.imshow(density_tbl, interpolation="nearest", origin="upper")
+    plt.colorbar()
+    plt.show()
+
+
+def plot_head_path(polygon_coords: List[List[float]]):
+    xs, ys = zip(*polygon_coords)  # create lists of x and y values
+    plt.figure()
+    plt.plot(xs, ys)
     plt.show()
