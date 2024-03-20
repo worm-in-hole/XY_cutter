@@ -3,7 +3,6 @@ from typing import List
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import kde
 
 
 class ReplayBuffer:
@@ -87,5 +86,7 @@ def plot_density_chart(density_tbl: np.ndarray):
 def plot_head_path(polygon_coords: List[List[float]]):
     xs, ys = zip(*polygon_coords)  # create lists of x and y values
     plt.figure()
+    plt.xlim(0, 30)
+    plt.ylim(0, 30)
     plt.plot(xs, ys)
     plt.show()

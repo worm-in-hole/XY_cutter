@@ -149,8 +149,10 @@ class XYCutter(gym.Env):
         """Вектор текущего состояния системы"""
         self._reward: float = 0.0
         """Текущая накопленная награда/штраф среды за выполненную работу"""
-        self._actions = []
+        self._actions_hist = []
         """Журнал действий"""
+        self._state_digs_hist = []
+        """Журнал состояний"""
         self._done: int = 0
         """Успешное завершение эпизода"""
         self._terminated: int = 0
@@ -277,10 +279,11 @@ class XYCutter(gym.Env):
         self._reward = 0.0
 
         # Добавляем "нулевое" действие - позиционирование головки в начало координат
-        self._actions = [(self._cur_position.coords.xy[0][0],
-                          self._cur_position.coords.xy[1][0],
-                          self._cur_velocity,
-                          self._is_on)]
+        self._actions_hist = [(self._cur_position.coords.xy[0][0],
+                               self._cur_position.coords.xy[1][0],
+                               self._cur_velocity,
+                               self._is_on)]
+        self._state_digs_hist.append(self._state[:13])
 
         return self._state
 
@@ -294,7 +297,7 @@ class XYCutter(gym.Env):
         :return: Возвращает список из значений:
           [observation, reward, terminated, truncated, info]
         """
-        self._actions.append(action)
+        self._actions_hist.append(action)
 
         next_x = round(action[0])
         next_y = round(action[1])
@@ -378,6 +381,7 @@ class XYCutter(gym.Env):
             self._work_done,
             self._work_in_vain
         ]
+        self._state_digs_hist.append(self._state[:13])
 
         self._reward, terminated, self._done = self._calc_reward()
         info = dict()
@@ -491,6 +495,10 @@ class XYCutter(gym.Env):
         reward += (work_done_properly.sum() / avg_desired_level.sum()) * 200
         # 2) Награждаем на 0.1 за каждое действие (нулевое действие - это начальная позиция, не учитываем)
         # reward += 0.1 * (len(self._actions) - 1)
+        # 3) награждаем за перемещения над деталью
+        action_line = shapely.LineString([self._actions_hist[-2][0:2], self._actions_hist[-1][0:2]])
+        reward += 0.1 if (union_poly.intersects(action_line)) else 0
+        reward += 0.5 if (union_poly.intersects(action_line)) and (round(self._state_digs_hist[-1][9]) == 1) else 0
 
         # Штрафуем
         # 1) Штрафуем за работу за пределами детали (x1).
@@ -500,13 +508,15 @@ class XYCutter(gym.Env):
         # 3) Штрафуем за поворот головки более 90 градусов (за каждый поворот).
         reward -= 1 if abs(self._angle) > math.pi / 2 else 0
         # 4) Штрафуем за включение головки над деталью (опционально, для лазера это не нужно?)
-        reward -= 5 if (self._detail_mask[int(self._actions[-2][0]), int(self._actions[-2][3])] == 1
-                        and round(self._actions[-2][9]) == 0
-                        and round(self._actions[-1][9]) == 1) else 0
-        # 5) Штрафуем на 2 за каждое действие выше определённого количества.
+        reward -= 2 if (self._detail_mask[
+                            round(min(max(self._state[1], self._actions_hist[-2][0]), self._state[2]-1)),
+                            round(min(max(self._state[4], self._actions_hist[-2][3]), self._state[5]-1))] == 1
+                        and round(self._state_digs_hist[-2][9]) == 0
+                        and round(self._state_digs_hist[-1][9]) == 1) else 0
+        # 5) Штрафуем на 1.5 за каждое действие выше определённого количества.
         #    (короткая сторона детали мм. / 0.5 площади головки мм. * 2 действия * 2 раза (запас))
-        if len(self._actions) - 1 >= expected_num_of_passes:
-            reward -= 2 * (len(self._actions) - 1 - expected_num_of_passes)
+        if len(self._actions_hist) - 1 >= expected_num_of_passes:
+            reward -= 3 * (len(self._actions_hist) - 1 - expected_num_of_passes)
 
         # Модель (критик) интересуют последствия одного конкретного действия
         delta_reward = reward - self._reward
@@ -528,8 +538,8 @@ if __name__ == '__main__':
     header_intensity = np.array(
         [
             [0.00, 0.00, 0.03, 0.05, 0.03, 0.00, 0.00],
-            [0.00, 0.03, 0.10, 0.13, 0.10, 0.03, 0.00],
-            [0.01, 0.03, 0.13, 0.18, 0.13, 0.03, 0.01],
+            [0.00, 0.03, 0.11, 0.13, 0.11, 0.03, 0.00],
+            [0.01, 0.03, 0.15, 0.18, 0.15, 0.03, 0.01],
             [0.01, 0.05, 0.18, 0.20, 0.18, 0.05, 0.01],
             [0.01, 0.03, 0.13, 0.18, 0.13, 0.03, 0.01],
             [0.00, 0.03, 0.10, 0.13, 0.10, 0.03, 0.00],
@@ -554,6 +564,6 @@ if __name__ == '__main__':
     state_4 = env.step(action_4)
 
     from project.utils import plot_head_path  # вредная зависимость
-    plot_head_path([(x, y) for x, y, _, _ in env._actions])
+    plot_head_path([(x, y) for x, y, _, _ in env._actions_hist])
 
     print(123)

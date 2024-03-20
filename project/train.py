@@ -24,6 +24,15 @@ from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer, draw_train
 # https://shapely.readthedocs.io/en/stable/reference/shapely.Polygon.html
 # https://python-graph-gallery.com/2d-density-plot/
 
+# Константы
+BATCH_SIZE = 250  # 250
+GAMMA = 0.99
+LR = 0.0005
+TAU = 0.007
+"""Коэффициент, с которым мы добавляем веса "грубой" модели к весам target-модели."""
+MAX_EPOCHS = 120
+BUFFER_SIZE = 10000
+
 # Задали интенсивность обработки головкой
 header_intensity = np.array(
     [
@@ -51,11 +60,13 @@ plot_density_chart(header_intensity)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # device = 'cpu'
 
-max_values = torch.tensor([30, 30, 3, 1]).to(device)  # TODO: hardcode
+max_values = [30, 30, 3, 1]  # TODO: hardcode
+min_values = [0.0, 0.0, 0.05, 0]
+max_values_gpu = torch.tensor(max_values).to(device)
 
 # Сделали много Mu-сетей (Акторы, прогнозируют действие при заданном состоянии).
-mu_origin_model = PolicyNet(max_values=max_values).to(device)  # mu_theta
-mu_target_model = PolicyNet(max_values=max_values).to(device)  # mu_theta'
+mu_origin_model = PolicyNet().to(device)  # mu_theta
+mu_target_model = PolicyNet().to(device)  # mu_theta'
 _ = mu_target_model.requires_grad_(False)  # target model doesn't need grad
 
 # Сделали много Q-сетей (Twin-Q) (Критики, прогнозируют награду при заданном состоянии и действии).
@@ -66,10 +77,9 @@ q_target_model2 = QNet().to(device)  # Q_phi2'
 _ = q_target_model1.requires_grad_(False)  # target model doesn't need grad
 _ = q_target_model2.requires_grad_(False)  # target model doesn't need grad
 
-GAMMA = 0.99
-opt_q1 = torch.optim.AdamW(q_origin_model1.parameters(), lr=0.0005)
-opt_q2 = torch.optim.AdamW(q_origin_model2.parameters(), lr=0.0005)
-opt_mu = torch.optim.AdamW(mu_origin_model.parameters(), lr=0.0005)
+opt_q1 = torch.optim.AdamW(q_origin_model1.parameters(), lr=LR)
+opt_q2 = torch.optim.AdamW(q_origin_model2.parameters(), lr=LR)
+opt_mu = torch.optim.AdamW(mu_origin_model.parameters(), lr=LR)
 
 
 def optimize(states_digs: List, states_matr: List, actions: List, rewards: List, next_states_digs: List, next_states_matr: List,dones: List):
@@ -99,8 +109,8 @@ def optimize(states_digs: List, states_matr: List, actions: List, rewards: List,
     # Compute reward + gamma * (1 - done) * min Q (mu_target1(next_states), mu_target2(next_states))
     mu_tgt_next_actions = mu_target_model(next_states_digs, next_states_matr)  # "точная" модель
     # считаем min Q из двух сеток
-    q1_tgt_next = q_target_model1(next_states_digs, next_states_matr, mu_tgt_next_actions)  # "точная" модель
-    q2_tgt_next = q_target_model2(next_states_digs, next_states_matr, mu_tgt_next_actions)  # "точная" модель
+    q1_tgt_next = q_target_model1(next_states_digs, next_states_matr, mu_tgt_next_actions * max_values_gpu)  # "точная" модель
+    q2_tgt_next = q_target_model2(next_states_digs, next_states_matr, mu_tgt_next_actions * max_values_gpu)  # "точная" модель
     q_tgt_next_min = torch.minimum(q1_tgt_next, q2_tgt_next)
     q_tgt = rewards + GAMMA * (1.0 - dones) * q_tgt_next_min  # некая усреднённая награда для обеих сетей-критиков
 
@@ -129,16 +139,12 @@ def optimize(states_digs: List, states_matr: List, actions: List, rewards: List,
     mu_org = mu_origin_model(states_digs, states_matr)  # "грубая" модель Актора
     for p in q_origin_model1.parameters():
         p.requires_grad = False  # disable grad in q_origin_model1 before computation
-    q_tgt_max = q_origin_model1(states_digs, states_matr, mu_org)  # это уже обученная "грубая" модель критика
+    q_tgt_max = q_origin_model1(states_digs, states_matr, mu_org * max_values_gpu)  # это уже обученная "грубая" модель критика
     # TODO: не понимаю, что здесь происходит.
     (-q_tgt_max).sum().backward()
     opt_mu.step()
     for p in q_origin_model1.parameters():
         p.requires_grad = True  # enable grad again
-
-
-TAU = 0.002
-"""Коэффициент, с которым мы добавляем веса "грубой" модели к весам target-модели."""
 
 
 def update_target():
@@ -174,22 +180,22 @@ def calc_action_with_noise(state: List):
         noise = ou_action_noise()
         # действие + небольшая случайность
         action = action_det.cpu().numpy() + noise  # шум небольшой, масштабировать не будем
-        action = np.clip(action, [0.01, 0.01, 0.05, 0], [29.99, 29.99, 3, 1])  # TODO: hardcode
+        action = np.multiply(action, max_values)
+        action = np.clip(action, min_values, max_values)  # TODO: hardcode
         return action[0].tolist()
 
 
 # сбрасываем веса
-ou_action_noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(1), sigma=np.ones(1) * 0.05)
+ou_action_noise = OrnsteinUhlenbeckActionNoise(mu=np.zeros(1), sigma=np.ones(1) * 0.07)
 
 # чистим буфер
-buffer = ReplayBuffer(buffer_size=50000)
+buffer = ReplayBuffer(buffer_size=BUFFER_SIZE)
 
 # start training
-batch_size = 250  # 250
 reward_records = []
 cum_reward = 0
 avg_reward = 0
-progress_bar = tqdm(range(30))
+progress_bar = tqdm(range(MAX_EPOCHS))
 for i in progress_bar:
     progress_bar.set_description('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
     # Run episode till done
@@ -208,9 +214,9 @@ for i in progress_bar:
         cum_reward += reward
 
         # Как только заполнили буфер до размера батча
-        if buffer.length() >= batch_size:
+        if buffer.length() >= BATCH_SIZE:
             # забираем из буфера случайную выборку нужного размера
-            states_digs, states_matr, actions, rewards, n_states_digs, n_states_matr, dones = buffer.sample(batch_size)
+            states_digs, states_matr, actions, rewards, n_states_digs, n_states_matr, dones = buffer.sample(BATCH_SIZE)
             # по выборке учим модельки
             optimize(states_digs, states_matr, actions, rewards, n_states_digs, n_states_matr, dones)
             # мягко обновляем веса в конечных модельках
@@ -219,11 +225,12 @@ for i in progress_bar:
         cnt += 1
         # if cnt % 100 == 0:
         #     print('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
-        if terminated or done:
+        if (terminated or done) and (cnt % 2 == 0):
             # plot_density_chart(state[13])
             # plot_density_chart(state[14])
             # plot_density_chart(state[15])
-            plot_head_path([(x, y) for x,y,_,_ in env._actions])
+            plot_head_path([(x, y) for x,y,_,_ in env._actions_hist])
+            pass
 
             # Записываем награду эпизода в вектор с историей
     reward_records.append(cum_reward)
@@ -234,6 +241,7 @@ for i in progress_bar:
     if avg_reward > 200.0:
         break
 
+time.sleep(0.1)
 draw_training_plot(reward_records)
 time.sleep(0.1)
 plot_density_chart(env._work_done)
