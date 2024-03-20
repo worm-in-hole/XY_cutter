@@ -9,7 +9,7 @@ import numpy as np
 from torch.nn import functional as F, Parameter
 
 from project.model import QNet, PolicyNet
-from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer
+from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer, draw_plot
 
 # Ссылки:
 # https://spinningup.openai.com/en/latest/spinningup/rl_intro.html
@@ -184,7 +184,7 @@ batch_size = 250  # 250
 reward_records = []
 cum_reward = 0
 avg_reward = 0
-progress_bar = tqdm(range(50))
+progress_bar = tqdm(range(10))
 for i in progress_bar:
     progress_bar.set_description('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
     # Run episode till done
@@ -225,3 +225,4 @@ for i in progress_bar:
         break
 
 print("\nDone")
+draw_plot(reward_records)
