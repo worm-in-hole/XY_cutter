@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 
 
 # Для расчёта конволюционных слоёв
@@ -13,12 +12,12 @@ class PolicyNet(nn.Module):
 
     В нашем случае, политика по текущему состоянию окружающей среды должна предсказывать оптимальное действие.
     """
-    def __init__(self, state_digits=5, state_matrixes=50*50*3, act_dim=5):
+    def __init__(self, state_digits_size=13, state_matrixes=50 * 50 * 3, act_dim=4):
         super().__init__()
 
         conv_channels = 6
 
-        # Кусок про обработку детали.
+        # Кусок про обработку детали (взято из ResNet).
         # Обрабатываем матрицы состояния.
         # 50*50*3 - размеры рабочей области на момент обучения. Но хочется уйти на произвольные размеры.
         self.conv1 = nn.Conv2d(3, conv_channels, (7, 7), (2, 2), (3, 3), bias=False)
@@ -31,12 +30,11 @@ class PolicyNet(nn.Module):
         # Выпрямляем
         self.flatter = nn.Flatten()
 
-        # Где-то тут подмешиваем вектор с числами состояния (их у нас пока 5: текущее положение, скорость и т.д.)
-
-        self.linear_mixer1 = nn.Linear(state_digits+1014, 512)
+        # Тут подмешиваем вектор с числами состояния (их у нас пока 5: текущее положение, скорость и т.д.)
+        self.linear_mixer1 = nn.Linear(1014 + state_digits_size, 512)
         self.linear2 = nn.Linear(512, 128)
-        self.linear3 = nn.Linear(128, act_dim)
-        self.output = nn.Tanh()  # вектор действий пока состоит из 5 координат
+        self.output = nn.Linear(128, act_dim)
+        # self.output = nn.Tanh()  # вектор действий пока состоит из 5 координат
 
     def forward(self, state_digits, state_matrixes):
         # А здесь на вход подаётся вектор из 4 элементов состояния
@@ -47,11 +45,10 @@ class PolicyNet(nn.Module):
         outs = self.flatter(outs)  # выпрямили!
 
         # Подмешиваем управляющий вектор
-        outs = torch.cat([state_digits, outs], dim=0)
+        outs = torch.cat([outs, state_digits], dim=1)
 
         outs = self.linear_mixer1(outs)
         outs = self.linear2(outs)
-        outs = self.linear3(outs)
         outs = self.output(outs)
 
         return outs
@@ -63,7 +60,7 @@ class QNet(nn.Module):
     Это средняя/суммарная награда агента в состоянии `s`, если он сделает действие `a` (не обязательно оптимальное),
     а потом будет действовать согласно оптимальной политике.
     """
-    def __init__(self, params=5, matrixes=2500*3):
+    def __init__(self, state_digits=13, state_matrixes=50*50*3, act_dim=4):
         super().__init__()
 
         conv_channels = 6
@@ -80,32 +77,24 @@ class QNet(nn.Module):
         # Выпрямляем
         self.flatter = nn.Flatten()
 
-        # Где-то тут подмешиваем наши данные
-
-        self.linear_mixer1 = nn.Linear(5+1014, 512)
+        # Тут подмешиваем вектор с числами состояния (их у нас пока 5: текущее положение, скорость и т.д.)
+        self.linear_mixer1 = nn.Linear(1014 + state_digits + act_dim, 512)
         self.linear2 = nn.Linear(512, 128)
-        self.linear3 = nn.Linear(128, 5)
-        self.output = nn.Linear(5, 1)
+        self.output = nn.Linear(128, 1)  # Прогнозируется награда - одно число
 
-    def forward(self, s_coords, s_matrixes, action):
+    def forward(self, state_digits, state_matrixes, action):
         # А здесь на вход подаётся вектор из 4 элементов состояния
-        outs = self.conv1(s_matrixes)
+        outs = self.conv1(state_matrixes)
         outs = self.bn1(outs)
         outs = self.relu1(outs)
         outs = self.maxpool1(outs)
         outs = self.flatter(outs)  # выпрямили!
 
-        # Подмешиваем управляющий вектор + векттор действий
-        outs = torch.cat([s_coords, action, outs], dim=0)
+        # Подмешиваем управляющий вектор + вектор действий
+        outs = torch.cat([outs, state_digits, action], dim=1)
 
         outs = self.linear_mixer1(outs)
         outs = self.linear2(outs)
-        outs = self.linear3(outs)
         outs = self.output(outs)  # должна быть только одна циферка на выходе - прогнозируемая награда
 
         return outs
-
-
-
-
-

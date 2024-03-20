@@ -140,9 +140,14 @@ class XYCutter(gym.Env):
         """Матрица размером с рабочую зону, которая аккумулирует работу головки за пределами детали, 
         пока головка движется во включенном состоянии."""
 
+        # TODO:
+        #   1) вести журнал действий
+        #   2) вести журнал времени на каждое действие
+        #   3) вести пройденный путь на каждой действие
+
         self._state = []
         """Вектор текущего состояния системы"""
-        self._reward: Tuple = (0, 0)
+        self._reward: float = 0.0
         """Текущая накопленная награда/штраф среды за выполненную работу"""
         self._actions = []
         """Журнал действий"""
@@ -244,16 +249,34 @@ class XYCutter(gym.Env):
         self._work_in_vain = copy.deepcopy(self._dummy_nd_array)
 
         # Формируем вектор состояний (мы чуть позже изымем из него матрицы _work_done и _work_in_vain).
-        self._state = [self._cur_position.coords.xy[0][0],
-                       self._cur_position.coords.xy[1][0],
-                       self._cur_velocity,
-                       self._angle,
-                       self._is_on,
-                       self._detail_mask,
-                       self._work_done,
-                       self._work_in_vain]
-        self._reward = (0, 0)
+        self._state = [
+            # граничные значения и маска детали не меняются во время обучения
+            # X [cur, min, max]
+            self._cur_position.coords.xy[0][0],
+            self._working_area.bounds[0],
+            self._working_area.bounds[2],
+            # Y [cur, min, max]
+            self._cur_position.coords.xy[1][0],
+            self._working_area.bounds[1],
+            self._working_area.bounds[3],
+            # Velocity [cur, min, max]
+            self._cur_velocity,
+            0,
+            3,  # TODO: хардкод
+            # Is On [cur, min, max]
+            self._is_on,
+            0,
+            1,  # TODO: хардкод
+            # Angle [cur, min, max]
+            self._angle,
+            # матрицы
+            self._detail_mask,
+            self._work_done,
+            self._work_in_vain
+        ]
+        self._reward = 0.0
 
+        # Добавляем "нулевое" действие - позиционирование головки в начало координат
         self._actions = [(self._cur_position.coords.xy[0][0],
                           self._cur_position.coords.xy[1][0],
                           self._cur_velocity,
@@ -282,75 +305,82 @@ class XYCutter(gym.Env):
         next_exposition = 1 / (next_velocity * 1000)  # время нахождения головки над 1 кв. мм. детали
         next_is_on = round(action[3])
 
-        terminated = self._calc_early_terminated(next_x, next_y, next_velocity, next_is_on)
-
         # Если входящие параметры в порядке
-        if not terminated:
-            if next_is_on:
-                # Вычисляем гипотенузу
-                distance = math.sqrt(
-                    (next_y - self._cur_position.coords.xy[1][0]) ** 2 +
-                    (next_x - self._cur_position.coords.xy[0][0]) ** 2
-                )
-                # Создаём массив для хранения работы, выполненной за одно действие.
-                unit_of_work_array = copy.deepcopy(self._dummy_nd_array)
-                # Считаем интенсивность работы с учётом времени экспозиции.
-                work_to_apply = self._processor_intensity * next_exposition
+        if next_is_on:
+            # Вычисляем гипотенузу
+            distance = math.sqrt(
+                (next_y - self._cur_position.coords.xy[1][0]) ** 2 +
+                (next_x - self._cur_position.coords.xy[0][0]) ** 2
+            )
+            # Создаём массив для хранения работы, выполненной за одно действие.
+            unit_of_work_array = copy.deepcopy(self._dummy_nd_array)
+            # Считаем интенсивность работы с учётом времени экспозиции.
+            work_to_apply = self._processor_intensity * next_exposition
 
-                # Выполняем работу (пока без учёта границ детали)
+            # Выполняем работу (пока без учёта границ детали)
 
-                # Идём вдоль гипотенузы с шагом 0.1 мм
-                point_processed = set()
-                for dd in range(0, int(distance * 10) + 1):
-                    # TODO: можем попадать в смежные ячейки из-за слишком частого шага
-                    #   Может быть, считать расстояние от последней покрашенной точки (если не более sqt(2), то можно красить)
-                    # раскладываем движение вдоль гипотенузы на движение вдоль осей
-                    dx = int(round(dd / 10 * math.cos(next_angle)))
-                    dy = int(round(dd / 10 * math.sin(next_angle)))
-                    # выполняем работу, если в этой точке мы ещё не были
-                    if (dx, dy) not in point_processed:
-                        # запоминаем точку, чтобы повторно не совершать в ней работу
-                        point_processed.add((dx, dy))
-                        # переходим к абсолютным координатам
-                        i = int(self._cur_position.coords.xy[0][0] + dx)
-                        j = int(self._cur_position.coords.xy[1][0] + dy)
-                        # применяем работу
-                        self._apply_work_to_point(i, j, unit_of_work_array, work_to_apply)
+            # Идём вдоль гипотенузы с шагом 0.1 мм
+            point_processed = set()
+            for dd in range(0, int(distance * 10) + 1):
+                # раскладываем движение вдоль гипотенузы на движение вдоль осей
+                dx_float = dd / 10 * math.cos(next_angle)
+                dy_float = dd / 10 * math.sin(next_angle)
+                dx = round(dx_float)
+                dy = round(dy_float)
+                # выполняем работу, если в этой точке мы ещё не были
+                # и если точка проходит рядом с центром ячейки (0.141421 ~= 0.1 * math.sqrt(2))
+                if ((dx, dy) not in point_processed
+                        and abs(dx_float - dx) < 0.141421
+                        and abs(dy_float - dy) < 0.141421):
+                    # запоминаем точку, чтобы повторно не совершать в ней работу
+                    point_processed.add((dx, dy))
+                    # переходим к абсолютным координатам
+                    i = int(self._cur_position.coords.xy[0][0] + dx)
+                    j = int(self._cur_position.coords.xy[1][0] + dy)
+                    # применяем работу
+                    self._apply_work_to_point(i, j, unit_of_work_array, work_to_apply)
 
-                # Разносим выполненную работу на 2 слоя: работа над деталью, работа за пределами детали.
-                # Добавляем работу за текущее действие к соответствующим слоям.
-                self._work_done += np.multiply(self._detail_mask, unit_of_work_array)
-                self._work_in_vain += np.multiply((self._detail_mask * -1) + 1, unit_of_work_array)
-                del unit_of_work_array, work_to_apply
+            # Разносим выполненную работу на 2 слоя: работа над деталью, работа за пределами детали.
+            # Добавляем работу за текущее действие к соответствующим слоям.
+            self._work_done += np.multiply(self._detail_mask, unit_of_work_array)
+            self._work_in_vain += np.multiply((self._detail_mask * -1) + 1, unit_of_work_array)
+            del unit_of_work_array, work_to_apply
 
-            # Формируем state
-            self._cur_position = Point(next_x, next_y)
-            self._cur_velocity = next_velocity
-            self._angle = next_angle
-            self._is_on = next_is_on
+        # Формируем state
+        self._cur_position = Point(next_x, next_y)
+        self._cur_velocity = next_velocity
+        self._angle = next_angle
+        self._is_on = next_is_on
 
-            # Формируем вектор состояний (мы чуть позже изымем из него матрицы _work_done и _work_in_vain).
-            # TODO: Хочу, чтобы модель сразу знала про габариты и быстро научилась предлагать допустимые значения.
-            #   Видится, что в state надо добавить допустимые значения для элементов вектора action.
-            self._state = [# TODO: задать рабочую зону, чтобы модель выучила мин-макс значения
-                           self._cur_position.coords.xy[0][0],
-                           self._cur_position.coords.xy[1][0],
-                           self._cur_velocity,
-                           self._angle,
-                           self._is_on,
-                           # 5 цифр 
-                           # TODO: вопрос, можно ли сюда передавать коррелированные параметры
-                           self._detail_mask,  # 50*50 = 2500 цифр
-                           self._work_done,
-                           self._work_in_vain]
+        # Формируем вектор состояний (мы чуть позже изымем из него матрицы _work_done и _work_in_vain).
+        self._state = [
+            # граничные значения и маска детали не меняются во время обучения
+            # X [cur, min, max]
+            self._cur_position.coords.xy[0][0],
+            self._working_area.bounds[0],
+            self._working_area.bounds[2],
+            # Y [cur, min, max]
+            self._cur_position.coords.xy[1][0],
+            self._working_area.bounds[1],
+            self._working_area.bounds[3],
+            # Velocity [cur, min, max]
+            self._cur_velocity,
+            0,
+            3,  # TODO: хардкод
+            # Is On [cur, min, max]
+            self._is_on,
+            0,
+            1,  # TODO: хардкод
+            # Angle [cur, min, max]
+            self._angle,
+            # матрицы
+            self._detail_mask,
+            self._work_done,
+            self._work_in_vain
+        ]
 
-            self._reward, terminated, self._done = self._calc_reward()
-            info = dict()
-
-        else:
-            info = dict()
-            self._reward = (self._reward[0] - 200, -200)
-            self._done = 0
+        self._reward, terminated, self._done = self._calc_reward()
+        info = dict()
 
         return self._state, self._reward, terminated, self._done, info
 
@@ -363,7 +393,7 @@ class XYCutter(gym.Env):
         :param unit_of_work_array: Массив размером с рабочее поле, где мы накапливаем работу.
         :param work_to_apply: Матрица работы (скорость прохода головки уже учтена)
         """
-        # Половина размера матрицы с работой.
+        # Половина размера матрицы интенсивности (матрица интенсивности всегда нечётная по высоте и ширине)
         # Удобнее считать, что матрица с работой имеет координаты (0, 0) в самом центре.
         # Слева и снизу - отрицательные, а справа и сверху положительные (обычные оси OX и OY).
         # Матрица с работой применяется к точке (i, j) своими координатами (0, 0) и
@@ -371,7 +401,7 @@ class XYCutter(gym.Env):
         work_hw = int((self._processor_intensity.shape[0] - 1) / 2)
         work_hh = int((self._processor_intensity.shape[1] - 1) / 2)
 
-        # Смотрим сколько надо от матрицы с работой отрезать слева и справа,
+        # Смотрим сколько надо от матрицы интенсивности отрезать слева и справа,
         # если матрица применяется вдоль границы рабочего поля.
         # work_hw = 3
         # i = 0, crop_min_x = 3    -min(0, i - work_hw)
@@ -403,7 +433,7 @@ class XYCutter(gym.Env):
         """
         Функция вычисляет ценность текущего состояния и награду за текущее действие.
 
-        :return: Возвращает 3 элемента: (reward, delta_reward), terminated, done
+        :return: Возвращает 3 элемента: delta_reward, terminated, done
         """
         # Награждаем:
         # 1) Награждаем за уменьшение необработанной области (x2).
@@ -460,7 +490,7 @@ class XYCutter(gym.Env):
         reward += (work_nearly_done.sum() / min_desired_level.sum()) * 50
         reward += (work_done_properly.sum() / avg_desired_level.sum()) * 200
         # 2) Награждаем на 0.1 за каждое действие (нулевое действие - это начальная позиция, не учитываем)
-        reward += 0.1 * (len(self._actions) - 1)
+        # reward += 0.1 * (len(self._actions) - 1)
 
         # Штрафуем
         # 1) Штрафуем за работу за пределами детали (x1).
@@ -470,51 +500,25 @@ class XYCutter(gym.Env):
         # 3) Штрафуем за поворот головки более 90 градусов (за каждый поворот).
         reward -= 1 if abs(self._angle) > math.pi / 2 else 0
         # 4) Штрафуем за включение головки над деталью (опционально, для лазера это не нужно?)
-        reward -= 5 if (self._detail_mask[int(self._actions[-2][0]), int(self._actions[-2][1])] == 1
-                        and round(self._actions[-2][3]) == 0
-                        and round(self._actions[-1][3]) == 1) else 0
-        # 5) Штрафуем на 0.2 за каждое действие выше определённого количества.
+        reward -= 5 if (self._detail_mask[int(self._actions[-2][0]), int(self._actions[-2][3])] == 1
+                        and round(self._actions[-2][9]) == 0
+                        and round(self._actions[-1][9]) == 1) else 0
+        # 5) Штрафуем на 2 за каждое действие выше определённого количества.
         #    (короткая сторона детали мм. / 0.5 площади головки мм. * 2 действия * 2 раза (запас))
-        reward -= 0.2 * ((len(self._actions) - 1) >= expected_num_of_passes)
+        if len(self._actions) - 1 >= expected_num_of_passes:
+            reward -= 2 * (len(self._actions) - 1 - expected_num_of_passes)
 
-        delta_reward = reward - self._reward[0]
+        # Модель (критик) интересуют последствия одного конкретного действия
+        delta_reward = reward - self._reward
 
         # 1) Деталь обработана с нужной степенью
         done = 1 if (work_not_started.sum() == 0
                      and work_nearly_done.sum() == 0
                      and work_done_properly.sum() > 0) else 0
         # 2) Накопленная награда опустилась меньше -200
-        terminated = 1 if not done and (reward < -200) else 0
+        terminated = 1 if not done and (reward < -200) else 0  # TODO: hardcode
 
-        return (reward, delta_reward), terminated, done
-
-    def _calc_early_terminated(self, next_x: int, next_y: int, next_velocity: float, next_is_on: int):
-        """
-        Функция для раннего выхода из процедуры, если на вход поданы запредельные значения параметров действия.
-
-        :param next_x:
-        :param next_y:
-        :param next_velocity:
-        :param next_is_on:
-        :return: 1 - если ошибка и надо выходить, 0 - можно продолжать обучение
-        """
-        terminated = 0
-        # 1) Координаты действия вышли за пределы нормы
-        if (next_x < self._working_area.bounds[0]
-                or next_x > self._working_area.bounds[2]):
-            terminated = 1
-        elif (next_y < self._working_area.bounds[1]
-                or next_y > self._working_area.bounds[3]):
-            terminated = 1
-        # 2) Скорость вышла за пределы нормы
-        elif next_velocity < 0 or next_velocity > 3:
-            terminated = 1
-        elif next_is_on < 0 or next_is_on > 1:
-            terminated = 1
-        else:
-            pass
-
-        return terminated
+        return delta_reward, terminated, done
 
     def close(self):
         pass

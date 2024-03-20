@@ -14,6 +14,13 @@ from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer
 # Ссылки:
 # https://spinningup.openai.com/en/latest/spinningup/rl_intro.html
 # https://spinningup.openai.com/en/latest/algorithms/ddpg.html
+# https://github.com/sshish/RL-DDPG/blob/master/main.ipynb
+# ---
+# https://github.com/Lornatang/ResNet-PyTorch/blob/main/model.py
+# https://neurohive.io/ru/vidy-nejrosetej/resnet-34-50-101/
+# https://education.yandex.ru/handbook/ml
+# https://shapely.readthedocs.io/en/stable/reference/shapely.Polygon.html
+# https://python-graph-gallery.com/2d-density-plot/
 
 # Задали интенсивность обработки головкой
 header_intensity = np.array(
@@ -38,6 +45,7 @@ env = XYCutter(
 
 # выбрали устройство вычисления
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = 'cpu'
 
 # Сделали много Mu-сетей (Акторы, прогнозируют действие при заданном состоянии).
 mu_origin_model = PolicyNet().to(device)  # mu_theta
@@ -58,39 +66,41 @@ opt_q2 = torch.optim.AdamW(q_origin_model2.parameters(), lr=0.0005)
 opt_mu = torch.optim.AdamW(mu_origin_model.parameters(), lr=0.0005)
 
 
-def optimize(states: List, actions: List, rewards: List, next_states: List, dones: List):
+def optimize(states_digs: List, states_matr: List, actions: List, rewards: List, next_states_digs: List, next_states_matr: List,dones: List):
     """
     Функция обучает "грубые" модели одного Актора и двух Критиков.
 
-    :param states:
-    :param actions:
-    :param rewards:
-    :param next_states:
-    :param dones:
+    :param states: список state'ов. Каждый state - список из 13 float'ов и 3 матриц.
+    :param actions: список action'ов. Каждый action - список из 4 float'ов.
+    :param rewards: список float'ов. Каждый float - отдельный reward.
+    :param next_states: аналогично states.
+    :param dones: список из bool'ов. Каждый bool - это флаг завершения покраски.
     :return:
     """
     # Преобразуем значения из окружающей среды в тензоры
-    states = torch.tensor(states, dtype=torch.float).to(device)
+    states_digs = torch.tensor(states_digs, dtype=torch.float).to(device)
+    states_matr = torch.tensor(np.stack(states_matr, axis=0), dtype=torch.float).to(device)
     actions = torch.tensor(actions, dtype=torch.float).to(device)
     rewards = torch.tensor(rewards, dtype=torch.float).to(device)
-    next_states = torch.tensor(next_states, dtype=torch.float).to(device)
+    next_states_digs = torch.tensor(next_states_digs, dtype=torch.float).to(device)
+    next_states_matr = torch.tensor(np.stack(next_states_matr, axis=0), dtype=torch.float).to(device)
     dones = torch.tensor(dones, dtype=torch.float).to(device)
 
-    actions = actions.unsqueeze(dim=1)
+    # actions = actions.unsqueeze(dim=1)
     rewards = rewards.unsqueeze(dim=1)
     dones = dones.unsqueeze(dim=1)
 
     # Compute reward + gamma * (1 - done) * min Q (mu_target1(next_states), mu_target2(next_states))
-    mu_tgt_next_actions = mu_target_model(next_states)  # "точная" модель
+    mu_tgt_next_actions = mu_target_model(next_states_digs, next_states_matr)  # "точная" модель
     # считаем min Q из двух сеток
-    q1_tgt_next = q_target_model1(next_states, mu_tgt_next_actions)  # "точная" модель
-    q2_tgt_next = q_target_model2(next_states, mu_tgt_next_actions)  # "точная" модель
+    q1_tgt_next = q_target_model1(next_states_digs, next_states_matr, mu_tgt_next_actions)  # "точная" модель
+    q2_tgt_next = q_target_model2(next_states_digs, next_states_matr, mu_tgt_next_actions)  # "точная" модель
     q_tgt_next_min = torch.minimum(q1_tgt_next, q2_tgt_next)
     q_tgt = rewards + GAMMA * (1.0 - dones) * q_tgt_next_min  # некая усреднённая награда для обеих сетей-критиков
 
     # Обучаем критика 1 (Q-сеть)
     opt_q1.zero_grad()
-    q1_org = q_origin_model1(states, actions)  # "грубая" модель
+    q1_org = q_origin_model1(states_digs, states_matr, actions)  # "грубая" модель
     loss_q1 = F.mse_loss(
         q1_org,
         q_tgt,
@@ -100,7 +110,7 @@ def optimize(states: List, actions: List, rewards: List, next_states: List, done
 
     # Обучаем критика 2 (Q-сеть)
     opt_q2.zero_grad()
-    q2_org = q_origin_model2(states, actions)  # "грубая" модель
+    q2_org = q_origin_model2(states_digs, states_matr, actions)  # "грубая" модель
     loss_q2 = F.mse_loss(
         q2_org,
         q_tgt,
@@ -110,10 +120,10 @@ def optimize(states: List, actions: List, rewards: List, next_states: List, done
 
     # Обучаем актора (Policy-сеть)
     opt_mu.zero_grad()
-    mu_org = mu_origin_model(states)  # "грубая" модель Актора
+    mu_org = mu_origin_model(states_digs, states_matr)  # "грубая" модель Актора
     for p in q_origin_model1.parameters():
         p.requires_grad = False  # disable grad in q_origin_model1 before computation
-    q_tgt_max = q_origin_model1(states, mu_org)  # это уже обученная "грубая" модель критика
+    q_tgt_max = q_origin_model1(states_digs, states_matr, mu_org)  # это уже обученная "грубая" модель критика
     # TODO: не понимаю, что здесь происходит. Кажется, это ответ на структуру последнего слоя Критика
     #   Видимо, Критик должен прогнозировать Reward.
     (-q_tgt_max).sum().backward()
@@ -141,20 +151,26 @@ def update_target():
 
 
 # Выбираем действие с учётом шума Ornstein-Uhlenbeck
-def calc_action_with_noise(state):
+def calc_action_with_noise(state: List):
     with torch.no_grad():
-        state = np.array(state)
-        s_batch = np.expand_dims(state, axis=0)
-        s_batch = torch.tensor(s_batch, dtype=torch.float).to(device)
+        state_digs = np.array(state[:13])
+        state_matr = np.array(state[13:])
+
+        # добавляем новую ось - ось батчей
+        s_digs_batch = np.expand_dims(state_digs, axis=0)
+        s_digs_batch = torch.tensor(s_digs_batch, dtype=torch.float).to(device)
+        s_matr_batch = np.expand_dims(state_matr, axis=0)
+        s_matr_batch = torch.tensor(s_matr_batch, dtype=torch.float).to(device)
+
         # действие по модели (deterministic)
-        action_det = mu_origin_model(s_batch)  # "грубая" модель Актора
-        action_det = action_det.squeeze(dim=1)
+        action_det = mu_origin_model(s_digs_batch, s_matr_batch)  # "грубая" модель Актора
+        action_det = action_det.squeeze(dim=1)  # избавились от оси батчей?
         # вычисляем шум (каждый раз новый)
-        noise = ou_action_noise()  # TODO: подогнать под размер
+        noise = ou_action_noise()
         # действие + небольшая случайность
-        action = action_det.cpu().numpy() + noise  # TODO: удобное место для масштабирования значений
-        action = np.clip(action, -1.0, 1.0)
-        return float(action.item())  # TODO: подогнать под размер
+        action = action_det.cpu().numpy() + noise  # шум небольшой, масштабировать не будем
+        action = np.clip(action, [0, 0, 0.05, 0], [49, 49, 3, 1])  # TODO: hardcode
+        return action[0].tolist()
 
 
 # сбрасываем веса
@@ -168,7 +184,7 @@ batch_size = 250  # 250
 reward_records = []
 cum_reward = 0
 avg_reward = 0
-progress_bar = tqdm(range(5000))
+progress_bar = tqdm(range(50))
 for i in progress_bar:
     progress_bar.set_description('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
     # Run episode till done
@@ -176,6 +192,7 @@ for i in progress_bar:
     done = False
     terminated = False
     cum_reward = 0
+    cnt = 0
     while not done and not terminated:
         # для текущего состояния вычисляем оптимальное действие
         action = calc_action_with_noise(state)
@@ -188,12 +205,15 @@ for i in progress_bar:
         # Как только заполнили буфер до размера батча
         if buffer.length() >= batch_size:
             # забираем из буфера случайную выборку нужного размера
-            states, actions, rewards, n_states, dones = buffer.sample(batch_size)
+            states_digs, states_matr, actions, rewards, n_states_digs, n_states_matr, dones = buffer.sample(batch_size)
             # по выборке учим модельки
-            optimize(states, actions, rewards, n_states, dones)
+            optimize(states_digs, states_matr, actions, rewards, n_states_digs, n_states_matr, dones)
             # мягко обновляем веса в конечных модельках
             update_target()
         state = state_next
+        cnt += 1
+        # if cnt % 100 == 0:
+        #     print('cum={0:0>5.1f}, avg={1:0>5.1f}'.format(cum_reward, avg_reward))
 
     # Записываем награду эпизода в вектор с историей
     reward_records.append(cum_reward)

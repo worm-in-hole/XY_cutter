@@ -21,12 +21,14 @@ class ReplayBuffer:
     def sample(self, batch_size):
         indices = [random.randint(0, len(self.buffer) - 1) for _ in range(batch_size)]
 
-        states = [self.buffer[i][0] for i in indices]
+        states_digs = [self.buffer[i][0][:13] for i in indices]  # TODO: hardcode
+        states_matr = [self.buffer[i][0][13:] for i in indices]
         actions = [self.buffer[i][1] for i in indices]
         rewards = [self.buffer[i][2] for i in indices]
-        n_states = [self.buffer[i][3] for i in indices]
+        n_states_digs = [self.buffer[i][3][:13] for i in indices]
+        n_states_matr = [self.buffer[i][3][13:] for i in indices]
         dones = [self.buffer[i][4] for i in indices]
-        return states, actions, rewards, n_states, dones
+        return states_digs, states_matr, actions, rewards, n_states_digs, n_states_matr, dones
 
     def length(self):
         return len(self.buffer)
