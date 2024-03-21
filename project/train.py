@@ -13,24 +13,13 @@ from project.model import QNet, PolicyNet
 from project.utils import OrnsteinUhlenbeckActionNoise, ReplayBuffer, draw_training_plot, plot_density_chart, \
     plot_head_path
 
-# Ссылки:
-# https://spinningup.openai.com/en/latest/spinningup/rl_intro.html
-# https://spinningup.openai.com/en/latest/algorithms/ddpg.html
-# https://github.com/sshish/RL-DDPG/blob/master/main.ipynb
-# ---
-# https://github.com/Lornatang/ResNet-PyTorch/blob/main/model.py
-# https://neurohive.io/ru/vidy-nejrosetej/resnet-34-50-101/
-# https://education.yandex.ru/handbook/ml
-# https://shapely.readthedocs.io/en/stable/reference/shapely.Polygon.html
-# https://python-graph-gallery.com/2d-density-plot/
-
 # Константы
 BATCH_SIZE = 250  # 250
 GAMMA = 0.99
-LR = 0.0005
-TAU = 0.007
+LR = 0.005
+TAU = 0.05
 """Коэффициент, с которым мы добавляем веса "грубой" модели к весам target-модели."""
-MAX_EPOCHS = 120
+MAX_EPOCHS = 50
 BUFFER_SIZE = 10000
 
 # Задали интенсивность обработки головкой
@@ -240,6 +229,10 @@ for i in progress_bar:
     # Завершаем обучение, когда средняя награда держится выше 475.0
     if avg_reward > 200.0:
         break
+
+# PyCharm'у плохеет, если выводить в него
+# слишком много картинок в единицу времени.
+# TODO: Прикрутить сохранение в видео.
 
 time.sleep(0.1)
 draw_training_plot(reward_records)
